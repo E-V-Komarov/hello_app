@@ -3,7 +3,7 @@ name: Build and Release
 on:
   push:
     tags:
-      - 'v*.*.*'   # например, v1.0.0
+      - 'v*.*.*'
 
 permissions:
   contents: write
@@ -15,7 +15,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04  # Явно фиксируем версию, чтобы избежать сюрпризов с Ubuntu 26
             artifact: hello-linux
             pyinstaller_name: hello
           - os: windows-latest
@@ -29,7 +29,23 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      # 🔑 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Установка системных библиотек для Kivy на Ubuntu
+      - name: Install system dependencies (Ubuntu only)
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev \
+            libgles2-mesa-dev \
+            libsdl2-dev \
+            libsdl2-image-dev \
+            libsdl2-mixer-dev \
+            libsdl2-ttf-dev \
+            libsm6 \
+            libxext6 \
+            libxrender1
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -53,13 +69,14 @@ jobs:
 
   build-android:
     name: Build Android APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
+      # 🔑 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Используем поддерживаемый экшен guysoft/buildozer-action
+      # Вместо устаревшего ArtemSBulgakov/buildozer-action@v1
       - name: Build with Buildozer
-        uses: ArtemSBulgakov/buildozer-action@v1
-        id: buildozer
+        uses: guysoft/buildozer-action@v1
         with:
           command: buildozer android debug
           buildozer_version: stable
@@ -67,7 +84,112 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: hello-android.apk
-          path: ${{ steps.buildozer.outputs.filename }}
+          path: bin/*.apk
+
+  release:
+    name: Create GitHub Release
+    needs: [build-desktop, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: truename: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-desktop:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04  # Явно фиксируем версию, чтобы избежать сюрпризов с Ubuntu 26
+            artifact: hello-linux
+            pyinstaller_name: hello
+          - os: windows-latest
+            artifact: hello-windows.exe
+            pyinstaller_name: hello.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 🔑 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Установка системных библиотек для Kivy на Ubuntu
+      - name: Install system dependencies (Ubuntu only)
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev \
+            libgles2-mesa-dev \
+            libsdl2-dev \
+            libsdl2-image-dev \
+            libsdl2-mixer-dev \
+            libsdl2-ttf-dev \
+            libsm6 \
+            libxext6 \
+            libxrender1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: pyinstaller --onefile --name hello main.py
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            mv dist/hello.exe dist/${{ matrix.artifact }}
+          else
+            mv dist/hello dist/${{ matrix.artifact }}
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # 🔑 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Используем поддерживаемый экшен guysoft/buildozer-action
+      # Вместо устаревшего ArtemSBulgakov/buildozer-action@v1
+      - name: Build with Buildozer
+        uses: guysoft/buildozer-action@v1
+        with:
+          command: buildozer android debug
+          buildozer_version: stable
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hello-android.apk
+          path: bin/*.apk
 
   release:
     name: Create GitHub Release
