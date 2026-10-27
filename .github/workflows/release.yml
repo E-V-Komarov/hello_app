@@ -4,22 +4,23 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to attach builds to (e.g., v1.0.0). Empty = use current ref.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
 
 jobs:
-  build-desktop:
-    name: Build ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            artifact: hello-linux
-          - os: windows-latest
-            artifact: hello-windows.exe
-
+  # ============================================================
+  # 1. LINUX
+  # ============================================================
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -27,8 +28,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install system dependencies (Ubuntu only)
-        if: matrix.os == 'ubuntu-24.04'
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -41,9 +41,37 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ДЛЯ WINDOWS: задаём бэкенд ANGLE перед PyInstaller
-      - name: Set Kivy GL backend for Windows (angle_sdl2)
-        if: matrix.os == 'windows-latest'
+      - name: Build with PyInstaller
+        run: pyinstaller --onefile --name hello main.py
+
+      - name: Rename artifact
+        run: mv dist/hello dist/hello-linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hello-linux
+          path: dist/hello-linux
+          if-no-files-found: error
+
+  # ============================================================
+  # 2. WINDOWS
+  # ============================================================
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Set Kivy GL backend (ANGLE, no hardware OpenGL on runner)
         shell: pwsh
         run: echo "KIVY_GL_BACKEND=angle_sdl2" >> $env:GITHUB_ENV
 
@@ -52,48 +80,116 @@ jobs:
 
       - name: Rename artifact
         shell: bash
-        run: |
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            mv dist/hello.exe "dist/${{ matrix.artifact }}"
-          else
-            mv dist/hello "dist/${{ matrix.artifact }}"
-          fi
+        run: mv dist/hello.exe dist/hello-windows.exe
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          name: hello-windows
+          path: dist/hello-windows.exe
+          if-no-files-found: error
 
+  # ============================================================
+  # 3. ANDROID
+  # ============================================================
   build-android:
-    name: Build Android APK
+    name: Build Android
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: используем оригинальный экшен, у которого есть тег v1
-      - name: Build with Buildozer
-        uses: ArtemSBulgakov/buildozer-action@v1
+      - uses: actions/setup-python@v5
         with:
-          command: buildozer android debug
-          buildozer_version: master   # или stable, если master нестабилен
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git zip unzip openjdk-17-jdk \
+            autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev \
+            cmake libffi-dev libssl-dev
+
+      - name: Cache Buildozer global directory
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+
+      - name: Install Buildozer
+        run: |
+          python -m pip install --upgrade pip
+          pip install buildozer
+
+      - name: Build APK
+        run: buildozer android debug
 
       - uses: actions/upload-artifact@v4
         with:
-          name: hello-android.apk
+          name: hello-android
           path: bin/*.apk
+          if-no-files-found: error
 
+  # ============================================================
+  # 4. RELEASE — запускается всегда (кроме ручной отмены),
+  #    публикует всё, что успешно собралось
+  # ============================================================
   release:
-    name: Create GitHub Release
-    needs: [build-desktop, build-android]
+    name: Create Release
+    needs: [build-linux, build-windows, build-android]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Build summary
+        run: |
+          echo "### Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux   | \`${{ needs.build-linux.result }}\`   |" >> $GITHUB_STEP_SUMMARY
+          echo "| Windows | \`${{ needs.build-windows.result }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Android | \`${{ needs.build-android.result }}\` |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Download all available artifacts
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-merge: true
+          merge-multiple: true
+        continue-on-error: true
 
-      - name: Create Release and Upload Assets
+      - name: List files ready for release
+        run: |
+          echo "=== Files ready for release ==="
+          find artifacts -type f 2>/dev/null || echo "(nothing)"
+
+      - name: Check if at least one artifact exists
+        id: check
+        run: |
+          if [ -d "artifacts" ] && [ -n "$(find artifacts -type f 2>/dev/null)" ]; then
+            echo "has_files=true" >> $GITHUB_OUTPUT
+            echo "Found $(find artifacts -type f | wc -l) file(s)"
+          else
+            echo "has_files=false" >> $GITHUB_OUTPUT
+            echo "::warning::No successful builds — release skipped"
+          fi
+
+      - name: Determine target tag
+        id: tag
+        if: steps.check.outputs.has_files == 'true'
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create or update GitHub Release
+        if: steps.check.outputs.has_files == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
           files: "artifacts/*"
           generate_release_notes: true
+          fail_on_unmatched_files: false
