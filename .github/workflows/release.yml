@@ -32,20 +32,20 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgl1-mesa-dev \
-            libgles2-mesa-dev \
-            libsdl2-dev \
-            libsdl2-image-dev \
-            libsdl2-mixer-dev \
-            libsdl2-ttf-dev \
-            libsm6 \
-            libxext6 \
-            libxrender1
+            libgl1-mesa-dev libgles2-mesa-dev libsdl2-dev \
+            libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
+            libsm6 libxext6 libxrender1
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ДЛЯ WINDOWS: задаём бэкенд ANGLE перед PyInstaller
+      - name: Set Kivy GL backend for Windows (angle_sdl2)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: echo "KIVY_GL_BACKEND=angle_sdl2" >> $env:GITHUB_ENV
 
       - name: Build with PyInstaller
         run: pyinstaller --onefile --name hello main.py
@@ -70,16 +70,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: используем оригинальный экшен, у которого есть тег v1
       - name: Build with Buildozer
-        uses: guysoft/buildozer-action@v1
+        uses: ArtemSBulgakov/buildozer-action@v1
         with:
           command: buildozer android debug
-          buildozer_version: stable
+          buildozer_version: master   # или stable, если master нестабилен
 
       - uses: actions/upload-artifact@v4
         with:
           name: hello-android.apk
-          path: "bin/*.apk"
+          path: bin/*.apk
 
   release:
     name: Create GitHub Release
@@ -89,10 +90,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true
-
-      - name: List downloaded files
-        run: ls -R artifacts
+          merge-merge: true
 
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
